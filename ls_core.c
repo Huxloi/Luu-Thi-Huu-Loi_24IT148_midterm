@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,77 +7,102 @@
 #include "format.h"
 #include "sort.h"
 
-void list_path(const char *path, int show_hidden, int long_format, int sort_time, int sort_size, int reverse_sort) {
-    DIR *dir = opendir(path);
-    if (!dir) {
-        perror("ls error");
+int opt_A = 0, opt_a = 0, opt_c = 0, opt_d = 0, opt_F = 0, opt_f = 0;
+int opt_h = 0, opt_i = 0, opt_k = 0, opt_l = 0, opt_n = 0, opt_q = 0;
+int opt_R = 0, opt_r = 0, opt_S = 0, opt_s = 0, opt_t = 0, opt_u = 0, opt_w = 0;
+
+void list_directory(const char *dir_path) {
+    struct stat dir_stat;
+    if (lstat(dir_path, &dir_stat) < 0) {
+        perror("my_ls");
         return;
     }
 
-    int capacity = 10;
-    int count = 0;
-    file_info_t *files = malloc(capacity * sizeof(file_info_t));
-    if (!files) {
-        closedir(dir);
-        perror("malloc error");
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (!show_hidden && entry->d_name[0] == '.') {
-            continue;
+    // Nếu là file thông thường hoặc có cờ -d, chỉ in chính nó
+    if (!S_ISDIR(dir_stat.st_mode) || opt_d) {
+        if (opt_i) printf("%lu ", (unsigned long)dir_stat.st_ino);
+        if (opt_s) printf("%lld ", (long long)(dir_stat.st_blocks / 2));
+        if (opt_l) {
+            print_long_format(&dir_stat, dir_path, dir_path);
+        } else {
+            printf("%s\n", dir_path);
         }
+        return;
+    }
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) {
+        perror("my_ls");
+        return;
+    }
+
+    file_info_t *files = NULL;
+    int count = 0, capacity = 10;
+    files = malloc(capacity * sizeof(file_info_t));
+
+    long total_blocks = 0;
+    struct dirent *entry;
+
+    while ((entry = readdir(dir)) != NULL) {
+        // Lọc ẩn theo -a và -A
+        if (!opt_a && !opt_A && entry->d_name[0] == '.') continue;
+        if (opt_A && entry->d_name[0] == '.' && (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)) continue;
 
         if (count >= capacity) {
             capacity *= 2;
-            file_info_t *temp = realloc(files, capacity * sizeof(file_info_t));
-            if (!temp) {
-                free(files);
-                closedir(dir);
-                perror("realloc error");
-                return;
-            }
-            files = temp;
+            files = realloc(files, capacity * sizeof(file_info_t));
         }
 
-        strncpy(files[count].name, entry->d_name, sizeof(files[count].name) - 1);
-        files[count].name[sizeof(files[count].name) - 1] = '\0';
+        snprintf(files[count].path, sizeof(files[count].path), "%s/%s", dir_path, entry->d_name);
+        snprintf(files[count].name, sizeof(files[count].name), "%s", entry->d_name);
 
-        snprintf(files[count].path, sizeof(files[count].path), "%s/%s", path, entry->d_name);
+        lstat(files[count].path, &files[count].statbuf);
+        files[count].ino = files[count].statbuf.st_ino;
+        files[count].blocks = files[count].statbuf.st_blocks;
 
-        if (lstat(files[count].path, &files[count].st) < 0) {
-            perror("lstat error");
-        }
-
+        total_blocks += files[count].blocks;
         count++;
     }
     closedir(dir);
 
-    // Thực hiện sắp xếp
-    if (sort_time) {
-        qsort(files, count, sizeof(file_info_t), compare_by_time);
-    } else if (sort_size) {
-        qsort(files, count, sizeof(file_info_t), compare_by_size);
-    } else {
-        qsort(files, count, sizeof(file_info_t), compare_by_name);
+    // Sắp xếp nếu không có cờ -f
+    if (!opt_f) {
+        sort_files(files, count);
     }
 
-    // Nếu bật cờ -r, đảo ngược mảng sau khi sắp xếp
-    if (reverse_sort) {
-        for (int i = 0; i < count / 2; i++) {
-            file_info_t temp = files[i];
-            files[i] = files[count - 1 - i];
-            files[count - 1 - i] = temp;
+    // In dòng total nếu dùng -l hoặc -s
+    if (opt_l || opt_s) {
+        printf("total %ld\n", total_blocks / 2);
+    }
+
+    // In danh sách file
+    for (int i = 0; i < count; i++) {
+        if (opt_i) {
+            printf("%lu ", (unsigned long)files[i].ino);
+        }
+        if (opt_s) {
+            printf("%lld ", (long long)(files[i].blocks / 2));
+        }
+        if (opt_l) {
+            print_long_format(&files[i].statbuf, files[i].name, files[i].path);
+        } else {
+            printf("%s", files[i].name);
+            if (opt_F) {
+                char suffix = get_file_type_suffix(&files[i].statbuf);
+                if (suffix) putchar(suffix);
+            }
+            printf("\n");
         }
     }
 
-    // In kết quả
-    for (int i = 0; i < count; i++) {
-        if (long_format) {
-            print_long_format(files[i].path, files[i].name, &files[i].st);
-        } else {
-            printf("%s\n", files[i].name);
+    // Đệ quy nếu có cờ -R
+    if (opt_R) {
+        for (int i = 0; i < count; i++) {
+            if (S_ISDIR(files[i].statbuf.st_mode)) {
+                if (strcmp(files[i].name, ".") == 0 || strcmp(files[i].name, "..") == 0) continue;
+                printf("\n%s:\n", files[i].path);
+                list_directory(files[i].path);
+            }
         }
     }
 
